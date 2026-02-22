@@ -15,6 +15,33 @@ router.get('/', async (req, res) => {
     }
 });
 
+// GET /api/workouts/last — Get the most recent workout before a given date
+// Query param: ?date=YYYY-MM-DD (defaults to today)
+router.get('/last', async (req, res) => {
+    try {
+        const pool = req.app.locals.pool;
+        const refDate = req.query.date || new Date().toISOString().split('T')[0];
+
+        const [rows] = await pool.query(
+            'SELECT Date FROM workout WHERE Date < ? ORDER BY Date DESC LIMIT 1',
+            [refDate]
+        );
+        if (rows.length === 0) {
+            return res.json({ lastDate: null, daysSince: null });
+        }
+        const lastDate = rows[0].Date;
+        const ref = new Date(refDate + 'T00:00:00');
+        const last = new Date(lastDate);
+        last.setHours(0, 0, 0, 0);
+        const diffMs = ref.getTime() - last.getTime();
+        const daysSince = Math.round(diffMs / (1000 * 60 * 60 * 24));
+        res.json({ lastDate, daysSince });
+    } catch (err) {
+        console.error('Error fetching last workout:', err);
+        res.status(500).json({ error: 'Failed to fetch last workout' });
+    }
+});
+
 // GET /api/workouts/:id — Get single workout with muscle groups & sets
 router.get('/:id', async (req, res) => {
     try {

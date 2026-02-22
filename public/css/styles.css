@@ -68,7 +68,9 @@
 }
 
 /* ========== Reset & Base ========== */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
@@ -243,8 +245,15 @@ body {
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .page-header {
@@ -598,6 +607,72 @@ body {
   font-size: 0.95rem;
 }
 
+/* ========== Custom Dropdown ========== */
+.custom-dropdown {
+  position: relative;
+}
+
+.custom-dropdown .dropdown-input {
+  width: 100%;
+  cursor: text;
+}
+
+.custom-dropdown .dropdown-list {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 50;
+  margin-top: 4px;
+}
+
+.custom-dropdown .dropdown-list.open {
+  display: block;
+  animation: fadeIn 0.15s ease;
+}
+
+.custom-dropdown .dropdown-item {
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background var(--transition);
+  color: var(--text-primary);
+}
+
+.custom-dropdown .dropdown-item:hover {
+  background: var(--bg-card-hover);
+}
+
+.custom-dropdown .dropdown-item.empty {
+  color: var(--text-muted);
+  font-style: italic;
+  cursor: default;
+}
+
+.custom-dropdown .dropdown-item.empty:hover {
+  background: transparent;
+}
+
+.custom-dropdown .dropdown-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-dropdown .dropdown-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-dropdown .dropdown-list::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
 /* ========== History ========== */
 .history-list {
   display: flex;
@@ -833,12 +908,22 @@ body {
 }
 
 @keyframes slideInRight {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
 
 @keyframes fadeOut {
-  to { opacity: 0; transform: translateY(10px); }
+  to {
+    opacity: 0;
+    transform: translateY(10px);
+  }
 }
 
 /* ========== Loading ========== */

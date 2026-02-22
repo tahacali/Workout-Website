@@ -5,7 +5,7 @@
 let movementCounter = 0;
 
 // ========== Log Workout Form ==========
-function initLogForm() {
+async function initLogForm() {
   const form = document.getElementById('workoutForm');
   const step1 = document.getElementById('formStep1');
   const step2 = document.getElementById('formStep2');
@@ -20,7 +20,21 @@ function initLogForm() {
 
   // Set default date to today
   const today = new Date().toISOString().split('T')[0];
-  document.getElementById('workoutDate').value = today;
+  const dateInput = document.getElementById('workoutDate');
+  dateInput.value = today;
+
+  // Default duration: 01:00
+  document.getElementById('workoutDuration').value = '01:00';
+
+  // Auto-calculate days since last workout from DB
+  await updateDaysSince(today);
+
+  // Recalculate when the date changes
+  dateInput.addEventListener('change', async () => {
+    if (dateInput.value) {
+      await updateDaysSince(dateInput.value);
+    }
+  });
 
   // Step navigation
   document.getElementById('btnToStep2').onclick = () => {
@@ -54,7 +68,25 @@ function initLogForm() {
   };
 }
 
-function addMovementCard() {
+/**
+ * Fetch the last workout before the given date and auto-fill the days-since field.
+ */
+async function updateDaysSince(selectedDate) {
+  try {
+    const lastData = await api.get(`/api/workouts/last?date=${selectedDate}`);
+    const field = document.getElementById('workoutDaysSince');
+    if (lastData.daysSince != null) {
+      field.value = lastData.daysSince;
+    } else {
+      field.value = '';
+      field.placeholder = 'No previous workout found';
+    }
+  } catch (err) {
+    console.error('Could not auto-fill days since:', err);
+  }
+}
+
+async function addMovementCard() {
   movementCounter++;
   const container = document.getElementById('movementsList');
   const cardId = movementCounter;
@@ -63,8 +95,14 @@ function addMovementCard() {
   card.className = 'movement-card';
   card.id = `movement-${cardId}`;
 
-  // Build datalist for muscle groups
-  const muscleGroupOptions = getAllMuscleGroups().map(g => `<option value="${g}">`).join('');
+  // Fetch distinct muscle groups from DB for suggestions
+  let muscleGroupOptions = '';
+  try {
+    const groups = await api.get('/api/muscle-groups/distinct-groups');
+    muscleGroupOptions = groups.map(g => `<option value="${g}">`).join('');
+  } catch (err) {
+    console.error('Could not fetch muscle groups:', err);
+  }
 
   card.innerHTML = `
     <div class="movement-header">
@@ -74,15 +112,17 @@ function addMovementCard() {
     <div class="movement-fields">
       <div class="form-group">
         <label>Muscle Group</label>
-        <input type="text" class="mv-muscle-group" placeholder="e.g. Chest" list="muscleGroupList-${cardId}" required>
-        <datalist id="muscleGroupList-${cardId}">
-          ${muscleGroupOptions}
-        </datalist>
+        <div class="custom-dropdown" id="mgDropdown-${cardId}">
+          <input type="text" class="mv-muscle-group dropdown-input" placeholder="Select or type muscle group" autocomplete="off" required>
+          <div class="dropdown-list"></div>
+        </div>
       </div>
       <div class="form-group">
         <label>Movement Name</label>
-        <input type="text" class="mv-movement-name" placeholder="Select muscle group first" list="movementNameList-${cardId}" required>
-        <datalist id="movementNameList-${cardId}"></datalist>
+        <div class="custom-dropdown" id="mvDropdown-${cardId}">
+          <input type="text" class="mv-movement-name dropdown-input" placeholder="Select muscle group first" autocomplete="off" required>
+          <div class="dropdown-list"></div>
+        </div>
       </div>
       <div class="form-group">
         <label>Number of Sets</label>
@@ -113,28 +153,93 @@ function addMovementCard() {
 
   container.appendChild(card);
 
-  // Wire up muscle group → movement suggestions
-  const muscleGroupInput = card.querySelector('.mv-muscle-group');
-  const movementNameInput = card.querySelector('.mv-movement-name');
-  const datalistId = `movementNameList-${cardId}`;
+  // ---- Wire up Muscle Group custom dropdown ----
+  const mgDropdown = card.querySelector(`#mgDropdown-${cardId}`);
+  const mgInput = mgDropdown.querySelector('.mv-muscle-group');
+  const mgList = mgDropdown.querySelector('.dropdown-list');
+  let allMuscleGroups = [];
+  try {
+    allMuscleGroups = await api.get('/api/muscle-groups/distinct-groups');
+  } catch (e) { /* ignore */ }
 
-  muscleGroupInput.addEventListener('input', () => {
-    updateMovementSuggestions(muscleGroupInput.value, datalistId);
-    movementNameInput.placeholder = 'Start typing to see suggestions...';
+  function renderMgDropdown(filter) {
+    const filtered = filter
+      ? allMuscleGroups.filter(g => g.toLowerCase().includes(filter.toLowerCase()))
+      : allMuscleGroups;
+    if (filtered.length === 0) {
+      mgList.innerHTML = '<div class="dropdown-item empty">No matches</div>';
+    } else {
+      mgList.innerHTML = filtered.map(g =>
+        `<div class="dropdown-item" data-value="${g}">${g}</div>`
+      ).join('');
+    }
+    mgList.classList.add('open');
+  }
+
+  mgInput.addEventListener('focus', () => renderMgDropdown(mgInput.value));
+  mgInput.addEventListener('input', () => renderMgDropdown(mgInput.value));
+
+  mgList.addEventListener('click', (e) => {
+    const item = e.target.closest('.dropdown-item');
+    if (item && !item.classList.contains('empty')) {
+      mgInput.value = item.dataset.value;
+      mgList.classList.remove('open');
+      // Trigger movement name suggestions
+      loadMovementSuggestions(card, cardId, item.dataset.value);
+    }
   });
 
-  // Also update on blur (when user selects from datalist)
-  muscleGroupInput.addEventListener('change', () => {
-    updateMovementSuggestions(muscleGroupInput.value, datalistId);
+  // Also load movement suggestions when muscle group changes via typing + blur
+  mgInput.addEventListener('change', () => {
+    loadMovementSuggestions(card, cardId, mgInput.value);
   });
 
-  // Wire up movement name → dynamic weight label
-  movementNameInput.addEventListener('input', () => {
-    updateWeightLabels(card, movementNameInput.value);
+  // ---- Wire up Movement Name custom dropdown ----
+  const mvDropdown = card.querySelector(`#mvDropdown-${cardId}`);
+  const mvInput = mvDropdown.querySelector('.mv-movement-name');
+  const mvList = mvDropdown.querySelector('.dropdown-list');
+
+  // Store suggestions on the card element
+  card._movementSuggestions = [];
+
+  function renderMvDropdown(filter) {
+    const suggestions = card._movementSuggestions || [];
+    const filtered = filter
+      ? suggestions.filter(m => m.toLowerCase().includes(filter.toLowerCase()))
+      : suggestions;
+    if (filtered.length === 0 && suggestions.length > 0) {
+      mvList.innerHTML = '<div class="dropdown-item empty">No matches</div>';
+    } else if (filtered.length === 0) {
+      mvList.innerHTML = '<div class="dropdown-item empty">No previous movements</div>';
+    } else {
+      mvList.innerHTML = filtered.map(m =>
+        `<div class="dropdown-item" data-value="${m}">${m}</div>`
+      ).join('');
+    }
+    mvList.classList.add('open');
+  }
+
+  mvInput.addEventListener('focus', () => renderMvDropdown(mvInput.value));
+  mvInput.addEventListener('input', () => renderMvDropdown(mvInput.value));
+
+  mvList.addEventListener('click', (e) => {
+    const item = e.target.closest('.dropdown-item');
+    if (item && !item.classList.contains('empty')) {
+      mvInput.value = item.dataset.value;
+      mvList.classList.remove('open');
+      updateWeightLabels(card, item.dataset.value);
+    }
   });
 
-  movementNameInput.addEventListener('change', () => {
-    updateWeightLabels(card, movementNameInput.value);
+  // Update weight label when movement name changes
+  mvInput.addEventListener('change', () => {
+    updateWeightLabels(card, mvInput.value);
+  });
+
+  // Close dropdowns when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!mgDropdown.contains(e.target)) mgList.classList.remove('open');
+    if (!mvDropdown.contains(e.target)) mvList.classList.remove('open');
   });
 
   // Auto-update set count when sets change
@@ -145,14 +250,18 @@ function addMovementCard() {
 }
 
 /**
- * Populate the movement name datalist based on the selected muscle group.
+ * Fetch movement name suggestions from the DB for the given muscle group.
  */
-function updateMovementSuggestions(muscleGroup, datalistId) {
-  const datalist = document.getElementById(datalistId);
-  if (!datalist) return;
-
-  const movements = getMovementsForMuscleGroup(muscleGroup);
-  datalist.innerHTML = movements.map(m => `<option value="${m.name}">`).join('');
+async function loadMovementSuggestions(card, cardId, muscleGroup) {
+  const mvInput = card.querySelector('.mv-movement-name');
+  try {
+    const movements = await api.get(`/api/muscle-groups/movements?muscle_group=${encodeURIComponent(muscleGroup)}`);
+    card._movementSuggestions = movements;
+    mvInput.placeholder = movements.length > 0 ? 'Click to see your movements' : 'Type a new movement name';
+  } catch (e) {
+    card._movementSuggestions = [];
+    mvInput.placeholder = 'Type a movement name';
+  }
 }
 
 /**
@@ -161,23 +270,15 @@ function updateMovementSuggestions(muscleGroup, datalistId) {
 function updateWeightLabels(card, movementName) {
   const label = getWeightLabel(movementName);
   const header = card.querySelector('.weight-col-header');
-  if (header) {
-    header.textContent = label;
-  }
+  if (header) header.textContent = label;
 
-  // Update placeholder on weight inputs
   const weightInputs = card.querySelectorAll('.set-weight');
-  weightInputs.forEach(input => {
-    if (label === 'Body Weight') {
-      input.placeholder = 'BW';
-    } else if (label === 'Duration (sec)') {
-      input.placeholder = 'seconds';
-    } else if (label === 'Assist Level') {
-      input.placeholder = 'level';
-    } else {
-      input.placeholder = '0';
-    }
-  });
+  let placeholder = '0';
+  if (label === 'Body Weight') placeholder = 'BW';
+  else if (label === 'Duration (sec)') placeholder = 'seconds';
+  else if (label === 'Assist Level') placeholder = 'level';
+
+  weightInputs.forEach(input => { input.placeholder = placeholder; });
 }
 
 function addSetRow(btn) {
@@ -185,7 +286,6 @@ function addSetRow(btn) {
   const count = tbody.querySelectorAll('tr').length + 1;
   const card = btn.closest('.movement-card');
 
-  // Get current weight label for placeholder
   const movementName = card.querySelector('.mv-movement-name').value;
   const label = getWeightLabel(movementName);
   let placeholder = '0';
@@ -201,21 +301,15 @@ function addSetRow(btn) {
     <td><button type="button" class="btn btn-icon btn-ghost" onclick="removeSetRow(this)" style="font-size: 0.8rem;">✕</button></td>
   `;
   tbody.appendChild(row);
-
-  // Update set_number input
   card.querySelector('.mv-set-number').value = count;
 }
 
 function removeSetRow(btn) {
   const tbody = btn.closest('tbody');
   btn.closest('tr').remove();
-
-  // Renumber sets
   tbody.querySelectorAll('tr').forEach((row, i) => {
     row.querySelector('td').textContent = i + 1;
   });
-
-  // Update set_number
   const card = tbody.closest('.movement-card');
   card.querySelector('.mv-set-number').value = tbody.querySelectorAll('tr').length;
 }
@@ -224,7 +318,6 @@ function syncSetsToCount(card, count) {
   const tbody = card.querySelector('.sets-body');
   const current = tbody.querySelectorAll('tr').length;
 
-  // Get current weight label for placeholder
   const movementName = card.querySelector('.mv-movement-name').value;
   const label = getWeightLabel(movementName);
   let placeholder = '0';
@@ -262,9 +355,8 @@ function removeMovement(id) {
 }
 
 /**
- * Submit the entire workout (workout details + all movements + all sets)
- * in one single API call. Nothing is saved to the database until this
- * function runs — all prior steps are local-only UI.
+ * Submit the entire workout in one single API call.
+ * Nothing is saved to the database until this runs.
  */
 async function submitWorkout() {
   const submitBtn = document.getElementById('btnSubmitWorkout');
@@ -275,7 +367,10 @@ async function submitWorkout() {
     const workoutDate = document.getElementById('workoutDate').value;
     const muscleGroupsStr = document.getElementById('workoutMuscleGroups').value;
     const daysSince = document.getElementById('workoutDaysSince').value;
-    const duration = document.getElementById('workoutDuration').value;
+    let duration = document.getElementById('workoutDuration').value;
+
+    // Default duration to 01:00 if empty
+    if (!duration) duration = '01:00';
 
     // Collect movements & sets
     const movements = [];
@@ -299,7 +394,6 @@ async function submitWorkout() {
       });
     });
 
-    // Everything is sent in ONE request — atomic insert
     const data = {
       Date: workoutDate,
       muscle_groups: muscleGroupsStr,
@@ -310,8 +404,6 @@ async function submitWorkout() {
 
     await api.post('/api/workouts', data);
     showToast('Workout saved successfully! 💪', 'success');
-
-    // Reset and go to dashboard
     setTimeout(() => navigateTo('dashboard'), 500);
   } catch (err) {
     console.error('Submit error:', err);
@@ -397,7 +489,7 @@ async function toggleWorkoutDetail(workoutId) {
     }
 
     detail.innerHTML = muscleGroups.map(mg => {
-      const weightLabel = getWeightLabel(mg.movement_name);
+      const unit = getWeightUnit(mg.movement_name);
       return `
         <div class="detail-movement">
           <h4>
@@ -409,7 +501,7 @@ async function toggleWorkoutDetail(workoutId) {
             ${(mg.sets || []).map((s, i) => `
               <div class="detail-set">
                 <div class="set-label">Set ${i + 1}</div>
-                <div class="set-value">${s.weight} ${weightLabel === 'Weight (kg)' ? 'kg' : weightLabel === 'Extra Weight (kg)' ? 'kg' : weightLabel === 'Assist Level' ? 'lvl' : weightLabel === 'Duration (sec)' ? 'sec' : ''} × ${s.movement} reps</div>
+                <div class="set-value">${s.weight}${unit ? ' ' + unit : ''} × ${s.movement} reps</div>
               </div>
             `).join('') || '<span style="color: var(--text-muted); font-size: 0.85rem;">No set details</span>'}
           </div>
@@ -433,7 +525,11 @@ async function openEditWorkout(workoutId) {
     const workout = await api.get(`/api/workouts/${workoutId}`);
 
     const dateVal = workout.Date ? workout.Date.split('T')[0] : '';
-    const durationVal = workout.duration || '';
+    // Format duration to HH:MM
+    let durationVal = workout.duration || '';
+    if (durationVal && durationVal.split(':').length > 2) {
+      durationVal = durationVal.split(':').slice(0, 2).join(':');
+    }
 
     body.innerHTML = `
       <form id="editWorkoutForm">
@@ -451,8 +547,8 @@ async function openEditWorkout(workoutId) {
             <input type="number" id="editDaysSince" value="${workout.days_since_last_workout || ''}" min="0">
           </div>
           <div class="form-group">
-            <label>Duration</label>
-            <input type="time" id="editDuration" value="${durationVal}" step="1">
+            <label>Duration (HH:MM)</label>
+            <input type="text" id="editDuration" value="${durationVal}" placeholder="01:00" pattern="[0-9]{1,2}:[0-9]{2}">
           </div>
         </div>
         <div class="modal-actions">
@@ -470,7 +566,7 @@ async function openEditWorkout(workoutId) {
           Date: document.getElementById('editDate').value,
           muscle_groups: document.getElementById('editMuscleGroups').value,
           days_since_last_workout: document.getElementById('editDaysSince').value ? parseInt(document.getElementById('editDaysSince').value) : null,
-          duration: document.getElementById('editDuration').value || null
+          duration: document.getElementById('editDuration').value || '01:00'
         });
 
         modal.classList.remove('open');

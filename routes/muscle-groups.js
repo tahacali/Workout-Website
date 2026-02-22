@@ -25,6 +25,46 @@ router.get('/', async (req, res) => {
     }
 });
 
+// GET /api/muscle-groups/distinct-groups — Get all unique muscle group names from DB
+router.get('/distinct-groups', async (req, res) => {
+    try {
+        const pool = req.app.locals.pool;
+        const [rows] = await pool.query(
+            'SELECT DISTINCT LOWER(muscle_group) AS muscle_group FROM muscle_groups ORDER BY muscle_group'
+        );
+        res.json(rows.map(r => r.muscle_group));
+    } catch (err) {
+        console.error('Error fetching distinct muscle groups:', err);
+        res.status(500).json({ error: 'Failed to fetch muscle groups' });
+    }
+});
+
+// GET /api/muscle-groups/movements?muscle_group=X — Get previously logged movements for a muscle group
+router.get('/movements', async (req, res) => {
+    try {
+        const pool = req.app.locals.pool;
+        const { muscle_group } = req.query;
+
+        if (!muscle_group) {
+            // Return all distinct movement names
+            const [rows] = await pool.query(
+                'SELECT DISTINCT movement_name FROM muscle_groups ORDER BY movement_name'
+            );
+            return res.json(rows.map(r => r.movement_name));
+        }
+
+        // Case-insensitive match for muscle group
+        const [rows] = await pool.query(
+            'SELECT DISTINCT movement_name FROM muscle_groups WHERE LOWER(muscle_group) = LOWER(?) ORDER BY movement_name',
+            [muscle_group.trim()]
+        );
+        res.json(rows.map(r => r.movement_name));
+    } catch (err) {
+        console.error('Error fetching movements:', err);
+        res.status(500).json({ error: 'Failed to fetch movements' });
+    }
+});
+
 // GET /api/muscle-groups/:id — Get single muscle group with its sets
 router.get('/:id', async (req, res) => {
     try {
