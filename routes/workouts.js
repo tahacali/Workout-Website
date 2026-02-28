@@ -136,29 +136,81 @@ router.post('/', async (req, res) => {
     }
 });
 
-// PUT /api/workouts/:id — Update workout
+// PUT /api/workouts/:id — Update workout (with full movement/set replacement)
 router.put('/:id', async (req, res) => {
-    try {
-        const pool = req.app.locals.pool;
-        const { id } = req.params;
-        const { Date: workoutDate, muscle_groups: muscleGroupsStr, days_since_last_workout, duration } = req.body;
+    const pool = req.app.locals.pool;
+    const connection = await pool.getConnection();
 
-        const [result] = await pool.query(
+    try {
+        await connection.beginTransaction();
+
+        const { id } = req.params;
+        const { Date: workoutDate, muscle_groups: muscleGroupsStr, days_since_last_workout, duration, muscleGroups } = req.body;
+
+        // 1. Get the old workout to find its date (for deleting old muscle_groups)
+        const [oldWorkouts] = await connection.query(
+            'SELECT * FROM workout WHERE workout_id = ?', [id]
+        );
+        if (oldWorkouts.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ error: 'Workout not found' });
+        }
+        const oldDate = oldWorkouts[0].Date;
+
+        // 2. Delete old set_information rows (via old muscle_group ids)
+        const [oldMgs] = await connection.query(
+            'SELECT id FROM muscle_groups WHERE date = ?', [oldDate]
+        );
+        const oldMgIds = oldMgs.map(mg => mg.id);
+        if (oldMgIds.length > 0) {
+            await connection.query(
+                'DELETE FROM set_information WHERE reference_muscle IN (?)', [oldMgIds]
+            );
+        }
+
+        // 3. Delete old muscle_groups rows
+        await connection.query('DELETE FROM muscle_groups WHERE date = ?', [oldDate]);
+
+        // 4. Update workout-level fields
+        await connection.query(
             'UPDATE workout SET Date = ?, muscle_groups = ?, days_since_last_workout = ?, duration = ? WHERE workout_id = ?',
             [workoutDate, muscleGroupsStr, days_since_last_workout, duration, id]
         );
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ error: 'Workout not found' });
+        // 5. Re-insert movements & sets
+        if (muscleGroups && Array.isArray(muscleGroups)) {
+            for (const mg of muscleGroups) {
+                const [mgResult] = await connection.query(
+                    'INSERT INTO muscle_groups (date, muscle_group, movement_name, set_number) VALUES (?, ?, ?, ?)',
+                    [workoutDate, mg.muscle_group, mg.movement_name, mg.set_number]
+                );
+                const mgId = mgResult.insertId;
+
+                if (mg.sets && Array.isArray(mg.sets)) {
+                    for (const set of mg.sets) {
+                        await connection.query(
+                            'INSERT INTO set_information (reference_muscle, weight, movement) VALUES (?, ?, ?)',
+                            [mgId, set.weight, set.reps]
+                        );
+                    }
+                }
+            }
         }
 
+        await connection.commit();
+
+        // Return the updated workout
         const [updated] = await pool.query(
             'SELECT * FROM workout WHERE workout_id = ?', [id]
         );
         res.json(updated[0]);
     } catch (err) {
+        await connection.rollback();
         console.error('Error updating workout:', err);
         res.status(500).json({ error: 'Failed to update workout' });
+    } finally {
+        connection.release();
     }
 });
 

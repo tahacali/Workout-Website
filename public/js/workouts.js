@@ -525,11 +525,12 @@ async function openEditWorkout(workoutId) {
     const workout = await api.get(`/api/workouts/${workoutId}`);
 
     const dateVal = workout.Date ? workout.Date.split('T')[0] : '';
-    // Format duration to HH:MM
     let durationVal = workout.duration || '';
     if (durationVal && durationVal.split(':').length > 2) {
       durationVal = durationVal.split(':').slice(0, 2).join(':');
     }
+
+    const existingMovements = workout.muscleGroups || [];
 
     body.innerHTML = `
       <form id="editWorkoutForm">
@@ -551,6 +552,15 @@ async function openEditWorkout(workoutId) {
             <input type="text" id="editDuration" value="${durationVal}" placeholder="01:00" pattern="[0-9]{1,2}:[0-9]{2}">
           </div>
         </div>
+
+        <h4 style="margin: 24px 0 12px; font-size: 1rem; font-weight: 700; color: var(--accent-secondary);">
+          Movements & Sets
+        </h4>
+        <div id="editMovementsList"></div>
+        <button type="button" class="btn btn-outline btn-add-movement" id="btnAddEditMovement">
+          + Add Movement
+        </button>
+
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost" onclick="document.getElementById('editModal').classList.remove('open')">Cancel</button>
           <button type="submit" class="btn btn-primary">💾 Save Changes</button>
@@ -558,15 +568,225 @@ async function openEditWorkout(workoutId) {
       </form>
     `;
 
+    const movementsList = document.getElementById('editMovementsList');
+    let editMovementCounter = 0;
+
+    // --- Helper: add a movement card (optionally pre-filled) ---
+    async function addEditMovementCard(data) {
+      editMovementCounter++;
+      const cardId = editMovementCounter;
+      const mg = data || { muscle_group: '', movement_name: '', set_number: '', sets: [] };
+      const isNew = !data;
+
+      const card = document.createElement('div');
+      card.className = 'movement-card';
+      card.id = `edit-movement-${cardId}`;
+
+      const setsHtml = (mg.sets && mg.sets.length > 0)
+        ? mg.sets.map((s, i) => {
+          const label = getWeightLabel(mg.movement_name);
+          let placeholder = '0';
+          if (label === 'Body Weight') placeholder = 'BW';
+          else if (label === 'Duration (sec)') placeholder = 'seconds';
+          else if (label === 'Assist Level') placeholder = 'level';
+          return `
+              <tr>
+                <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${i + 1}</td>
+                <td><input type="number" class="set-weight" step="0.5" min="0" value="${s.weight || 0}" placeholder="${placeholder}"></td>
+                <td><input type="number" class="set-reps" min="1" value="${s.movement || 0}" placeholder="0"></td>
+                <td><button type="button" class="btn btn-icon btn-ghost" onclick="removeEditSetRow(this)" style="font-size: 0.8rem;">✕</button></td>
+              </tr>
+            `;
+        }).join('')
+        : ''; // Empty — rows are created when user enters set count
+
+      const weightLabel = getWeightLabel(mg.movement_name);
+
+      card.innerHTML = `
+        <div class="movement-header">
+          <h4>Movement #${cardId}</h4>
+          <button type="button" class="btn btn-icon btn-ghost" onclick="this.closest('.movement-card').remove()" title="Remove movement">🗑️</button>
+        </div>
+        <div class="movement-fields">
+          <div class="form-group">
+            <label>Muscle Group</label>
+            <div class="custom-dropdown" id="editMgDropdown-${cardId}">
+              <input type="text" class="mv-muscle-group dropdown-input" value="${mg.muscle_group || ''}" placeholder="Select or type muscle group" autocomplete="off" required>
+              <div class="dropdown-list"></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Movement Name</label>
+            <div class="custom-dropdown" id="editMvDropdown-${cardId}">
+              <input type="text" class="mv-movement-name dropdown-input" value="${mg.movement_name || ''}" placeholder="${mg.muscle_group ? 'Click to see your movements' : 'Select muscle group first'}" autocomplete="off" required>
+              <div class="dropdown-list"></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Number of Sets</label>
+            <input type="number" class="mv-set-number" min="1" value="${isNew ? '' : (mg.set_number || mg.sets?.length || '')}" placeholder="e.g. 3" required>
+          </div>
+        </div>
+        <h5 style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px; font-weight: 600;">Sets Detail</h5>
+        <table class="sets-table">
+          <thead>
+            <tr>
+              <th style="width: 60px;">Set</th>
+              <th class="weight-col-header">${weightLabel}</th>
+              <th>Reps</th>
+              <th style="width: 50px;"></th>
+            </tr>
+          </thead>
+          <tbody class="sets-body">
+            ${setsHtml}
+          </tbody>
+        </table>
+        <button type="button" class="btn-add-set" onclick="addEditSetRow(this)">+ Add Set</button>
+      `;
+
+      movementsList.appendChild(card);
+
+      // ---- Wire up Muscle Group custom dropdown ----
+      const mgDropdown = card.querySelector(`#editMgDropdown-${cardId}`);
+      const mgInput = mgDropdown.querySelector('.mv-muscle-group');
+      const mgList = mgDropdown.querySelector('.dropdown-list');
+      let allMuscleGroups = [];
+      try {
+        allMuscleGroups = await api.get('/api/muscle-groups/distinct-groups');
+      } catch (e) { /* ignore */ }
+
+      function renderMgDropdown(filter) {
+        const filtered = filter
+          ? allMuscleGroups.filter(g => g.toLowerCase().includes(filter.toLowerCase()))
+          : allMuscleGroups;
+        if (filtered.length === 0) {
+          mgList.innerHTML = '<div class="dropdown-item empty">No matches</div>';
+        } else {
+          mgList.innerHTML = filtered.map(g =>
+            `<div class="dropdown-item" data-value="${g}">${g}</div>`
+          ).join('');
+        }
+        mgList.classList.add('open');
+      }
+
+      mgInput.addEventListener('focus', () => renderMgDropdown(mgInput.value));
+      mgInput.addEventListener('input', () => renderMgDropdown(mgInput.value));
+
+      mgList.addEventListener('click', (e) => {
+        const item = e.target.closest('.dropdown-item');
+        if (item && !item.classList.contains('empty')) {
+          mgInput.value = item.dataset.value;
+          mgList.classList.remove('open');
+          loadMovementSuggestions(card, cardId, item.dataset.value);
+        }
+      });
+
+      mgInput.addEventListener('change', () => {
+        loadMovementSuggestions(card, cardId, mgInput.value);
+      });
+
+      // ---- Wire up Movement Name custom dropdown ----
+      const mvDropdown = card.querySelector(`#editMvDropdown-${cardId}`);
+      const mvInput = mvDropdown.querySelector('.mv-movement-name');
+      const mvList = mvDropdown.querySelector('.dropdown-list');
+
+      card._movementSuggestions = [];
+
+      // Pre-load suggestions if muscle group is already set
+      if (mg.muscle_group) {
+        try {
+          const movements = await api.get(`/api/muscle-groups/movements?muscle_group=${encodeURIComponent(mg.muscle_group)}`);
+          card._movementSuggestions = movements;
+        } catch (e) { /* ignore */ }
+      }
+
+      function renderMvDropdown(filter) {
+        const suggestions = card._movementSuggestions || [];
+        const filtered = filter
+          ? suggestions.filter(m => m.toLowerCase().includes(filter.toLowerCase()))
+          : suggestions;
+        if (filtered.length === 0 && suggestions.length > 0) {
+          mvList.innerHTML = '<div class="dropdown-item empty">No matches</div>';
+        } else if (filtered.length === 0) {
+          mvList.innerHTML = '<div class="dropdown-item empty">No previous movements</div>';
+        } else {
+          mvList.innerHTML = filtered.map(m =>
+            `<div class="dropdown-item" data-value="${m}">${m}</div>`
+          ).join('');
+        }
+        mvList.classList.add('open');
+      }
+
+      mvInput.addEventListener('focus', () => renderMvDropdown(mvInput.value));
+      mvInput.addEventListener('input', () => renderMvDropdown(mvInput.value));
+
+      mvList.addEventListener('click', (e) => {
+        const item = e.target.closest('.dropdown-item');
+        if (item && !item.classList.contains('empty')) {
+          mvInput.value = item.dataset.value;
+          mvList.classList.remove('open');
+          updateWeightLabels(card, item.dataset.value);
+        }
+      });
+
+      mvInput.addEventListener('change', () => {
+        updateWeightLabels(card, mvInput.value);
+      });
+
+      // Close dropdowns when clicking outside
+      document.addEventListener('click', (e) => {
+        if (!mgDropdown.contains(e.target)) mgList.classList.remove('open');
+        if (!mvDropdown.contains(e.target)) mvList.classList.remove('open');
+      });
+
+      // Auto-sync set rows when set number changes
+      const setNumberInput = card.querySelector('.mv-set-number');
+      setNumberInput.addEventListener('change', () => {
+        syncEditSetsToCount(card, parseInt(setNumberInput.value));
+      });
+    }
+
+    // Populate existing movements
+    existingMovements.forEach(mg => addEditMovementCard(mg));
+
+    // Wire up "Add Movement" button
+    document.getElementById('btnAddEditMovement').addEventListener('click', () => {
+      addEditMovementCard(null);
+    });
+
+    // --- Form submit ---
     document.getElementById('editWorkoutForm').onsubmit = async (e) => {
       e.preventDefault();
 
       try {
+        // Collect movements & sets from the modal
+        const movements = [];
+        movementsList.querySelectorAll('.movement-card').forEach(card => {
+          const muscleGroup = card.querySelector('.mv-muscle-group').value;
+          const movementName = card.querySelector('.mv-movement-name').value;
+          const setNumber = parseInt(card.querySelector('.mv-set-number').value);
+
+          const sets = [];
+          card.querySelectorAll('.sets-body tr').forEach(row => {
+            const weight = parseFloat(row.querySelector('.set-weight').value) || 0;
+            const reps = parseInt(row.querySelector('.set-reps').value) || 0;
+            sets.push({ weight, reps });
+          });
+
+          movements.push({
+            muscle_group: muscleGroup,
+            movement_name: movementName,
+            set_number: setNumber,
+            sets
+          });
+        });
+
         await api.put(`/api/workouts/${workoutId}`, {
           Date: document.getElementById('editDate').value,
           muscle_groups: document.getElementById('editMuscleGroups').value,
           days_since_last_workout: document.getElementById('editDaysSince').value ? parseInt(document.getElementById('editDaysSince').value) : null,
-          duration: document.getElementById('editDuration').value || '01:00'
+          duration: document.getElementById('editDuration').value || '01:00',
+          muscleGroups: movements
         });
 
         modal.classList.remove('open');
@@ -580,6 +800,74 @@ async function openEditWorkout(workoutId) {
     modal.classList.add('open');
   } catch (err) {
     showToast('Failed to load workout data', 'error');
+  }
+}
+
+// --- Edit modal helper: add a set row ---
+function addEditSetRow(btn) {
+  const tbody = btn.previousElementSibling.querySelector('.sets-body');
+  const count = tbody.querySelectorAll('tr').length + 1;
+  const card = btn.closest('.movement-card');
+
+  const movementName = card.querySelector('.mv-movement-name').value;
+  const label = getWeightLabel(movementName);
+  let placeholder = '0';
+  if (label === 'Body Weight') placeholder = 'BW';
+  else if (label === 'Duration (sec)') placeholder = 'seconds';
+  else if (label === 'Assist Level') placeholder = 'level';
+
+  const row = document.createElement('tr');
+  row.innerHTML = `
+    <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${count}</td>
+    <td><input type="number" class="set-weight" step="0.5" min="0" placeholder="${placeholder}"></td>
+    <td><input type="number" class="set-reps" min="1" placeholder="0"></td>
+    <td><button type="button" class="btn btn-icon btn-ghost" onclick="removeEditSetRow(this)" style="font-size: 0.8rem;">✕</button></td>
+  `;
+  tbody.appendChild(row);
+  card.querySelector('.mv-set-number').value = count;
+}
+
+// --- Edit modal helper: remove a set row ---
+function removeEditSetRow(btn) {
+  const row = btn.closest('tr');
+  const tbody = row.closest('.sets-body');
+  const card = btn.closest('.movement-card');
+  row.remove();
+  // Re-number remaining rows
+  tbody.querySelectorAll('tr').forEach((r, i) => {
+    r.querySelector('td').textContent = i + 1;
+  });
+  card.querySelector('.mv-set-number').value = tbody.querySelectorAll('tr').length;
+}
+
+// --- Edit modal helper: sync set rows to match the number entered ---
+function syncEditSetsToCount(card, count) {
+  const tbody = card.querySelector('.sets-body');
+  const current = tbody.querySelectorAll('tr').length;
+
+  const movementName = card.querySelector('.mv-movement-name').value;
+  const label = getWeightLabel(movementName);
+  let placeholder = '0';
+  if (label === 'Body Weight') placeholder = 'BW';
+  else if (label === 'Duration (sec)') placeholder = 'seconds';
+  else if (label === 'Assist Level') placeholder = 'level';
+
+  if (count > current) {
+    for (let i = current + 1; i <= count; i++) {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${i}</td>
+        <td><input type="number" class="set-weight" step="0.5" min="0" placeholder="${placeholder}"></td>
+        <td><input type="number" class="set-reps" min="1" placeholder="0"></td>
+        <td><button type="button" class="btn btn-icon btn-ghost" onclick="removeEditSetRow(this)" style="font-size: 0.8rem;">✕</button></td>
+      `;
+      tbody.appendChild(row);
+    }
+  } else if (count < current) {
+    const rows = tbody.querySelectorAll('tr');
+    for (let i = current - 1; i >= count; i--) {
+      rows[i].remove();
+    }
   }
 }
 

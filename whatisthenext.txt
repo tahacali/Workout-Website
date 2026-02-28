@@ -1,0 +1,2 @@
+We can make this website to "application of everything". 
+I want to insert a new feature to my website. I want to control my attendance informations week by week. Maybe we need to create new web application instead of making app of everything?
